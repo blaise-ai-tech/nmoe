@@ -1,0 +1,38 @@
+[[task]]
+name = "ARC-Easy"
+source = "hf:ai2_arc:ARC-Easy:test"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "ARC-Challenge"
+source = "hf:ai2_arc:ARC-Challenge:test"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "MMLU"
+source = "hf:hendrycks_test:all:test"
+fewshot = 5
+scorer = "choices"
+
+[[task]]
+name = "GSM8K"
+source = "hf:openai/gsm8k:main:test"
+fewshot = 0
+scorer = "span"
+answer_field = "answer"
+
+[[task]]
+name = "HumanEval"
+source = "hf:openai/openai_humaneval:test"
+fewshot = 0
+scorer = "unittest"
+
+[[task]]
+name = "HYDRA-KEEP"
+source = "jsonl:/data/eval/hydra_heldout.jsonl"
+fewshot = 0
+scorer = "judge"
+tau_keep = 0.5
+

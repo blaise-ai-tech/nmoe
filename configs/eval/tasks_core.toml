@@ -1,0 +1,64 @@
+# CORE evaluation suite (nanochat/DCLM parity)
+# Schema mirrors configs/eval/tasks.toml: an array of [[task]] tables
+# Fields:
+#   name      - human-readable task name
+#   source    - dataset locator in the form "hf:<dataset>:<subset>:<split>" or other schemes
+#   fewshot   - number of in-context examples (0 unless specified)
+#   scorer    - one of: choices | span | unittest | judge
+#   (optional) answer_field, tau_keep, etc.
+
+[[task]]
+name = "ARC-Easy"
+source = "hf:allenai/ai2_arc:ARC-Easy:test"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "ARC-Challenge"
+source = "hf:allenai/ai2_arc:ARC-Challenge:test"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "HellaSwag"
+source = "hf:Rowan/hellaswag:validation"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "MMLU"
+source = "hf:cais/mmlu:all:dev"
+fewshot = 5
+scorer = "choices"
+
+[[task]]
+name = "OpenBookQA"
+source = "hf:allenai/openbookqa:main:test"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "WinoGrande"
+source = "hf:allenai/winogrande:winogrande_debiased:validation"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "BoolQ"
+source = "hf:google/boolq:validation"
+fewshot = 0
+scorer = "choices"
+
+[[task]]
+name = "COPA"
+source = "hf:super_glue:copa:validation"
+fewshot = 0
+scorer = "choices"
+
+
+[[task]]
+name = "SQuAD v1.1"
+source = "hf:squad:plain_text:validation"
+fewshot = 0
+scorer = "span"
+answer_field = "answers"  # list of {text: str}

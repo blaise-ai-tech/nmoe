@@ -1,0 +1,47 @@
+# Moonlight: Moonlet scaling baseline for 8 GPUs (single-node IPC).
+#
+# Usage:
+#   torchrun --nproc_per_node=8 -m nmoe.train configs/moonlight.toml
+#
+# NOTE: batch_size is the *global* batch (data-parallel split). For 8 GPUs,
+# batch_size=64 means 8 sequences per GPU per step.
+
+preset = "moonlight"
+experiment_id = "moonlight_dev"
+
+# =============================================================================
+# Model Architecture (REQUIRED)
+# =============================================================================
+vocab_size = 201088         # o200k_harmony tokenizer
+tokenizer  = "o200k_harmony"
+dim = 2048
+inter_dim = 11264
+moe_inter_dim = 1408
+n_layers = 27
+n_dense_layers = 1
+n_heads = 16
+n_routed_experts = 64
+n_shared_experts = 2
+n_activated_experts = 6      # routed top-k; total experts/token = n_shared_experts + n_activated_experts (=8)
+route_scale = 2.446
+
+# =============================================================================
+# Data
+# =============================================================================
+data_path = "/data/fineweb_edu"  # Pre-tokenized .npy shards (from nmoe.data.cli prep)
+
+# =============================================================================
+# Optimizer (matches old_nmoe moonlet.toml)
+# =============================================================================
+lr_dense = 3e-3
+lr_router = 3e-3     # Separate router LR with weight_decay=0 (critical for aux-free)
+lr_expert = 4.5e-2   # 15x dense LR to compensate for smaller expert gradients
+
+# =============================================================================
+# Training Overrides
+# =============================================================================
+steps = 200
+dtype = "bf16"
+batch_size = 64
+seq_len = 4096
+resume = false

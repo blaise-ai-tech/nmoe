@@ -1,0 +1,65 @@
+[run]
+# Logical dataset/run id (used for output paths and manifests).
+name = "fineweb_edu_k2"
+
+# Root output directory. Each K8s Indexed shard writes to:
+#   {output_root}/shard_{JOB_COMPLETION_INDEX}
+output_root = "/data/flows/fineweb_edu_k2"
+
+# Indexed sharding
+num_shards = 8
+shard_index_env = "JOB_COMPLETION_INDEX"
+
+# Global budget (split evenly across shards via ceil(max_docs_global/num_shards)).
+max_docs_global = 100000
+
+[source]
+type = "huggingface"
+dataset = "HuggingFaceFW/fineweb-edu"
+subset = "sample-10BT"
+split = "train"
+text_field = "text"
+id_field = "id"
+streaming = true
+
+[model]
+checkpoint = "/data/checkpoints/gpt-oss-20b"
+
+[hydra]
+heads_dir = "/workspace/nmoe/nmoe/data"
+calibration_dir = "/workspace/nmoe/nmoe/data"
+max_ctx = 4096
+max_batch = 16
+
+[rephrase]
+enabled = true
+num_versions = 10
+chunk_size = 2048
+max_ctx = 8192
+max_batch = 8
+batch_size = 8
+max_new = 8192
+temperature = 0.8
+top_p = 0.9
+style_diversity = true
+
+# Optional: quality-gate rephrases with the local HYDRA head.
+hydra_filter = false
+hydra_max_ctx = 4096
+hydra_batch_size = 16
+
+[prep]
+enabled = true
+tokenizer = "o200k_harmony"
+vocab_size = 201088
+eos_token_id = 199999
+
+# Use a single shard namespace per pipeline shard output; rotation handled by
+# tokens_per_shard (ShardedWriter).
+num_shards = 1
+tokens_per_shard = 500000000
+workers = 8
+batch_size = 1000
+min_tokens = 10
+max_tokens = 1000000
+parallel = false

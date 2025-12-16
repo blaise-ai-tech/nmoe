@@ -1,0 +1,613 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+import torch
+
+from .model import BatchedGenerator, Transformer, pool_hidden
+from .train import ProbeHead, MTPJudgeHead
+from .score import build_prompt, right_trim, grade_prompts, compute_aggregated
+from .docid import parse_doc_id, shard_path
+
+try:
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+except Exception:  # pragma: no cover
+    HarmonyEncodingName = None  # type: ignore
+    load_harmony_encoding = None  # type: ignore
+
+
+def _load_enc():
+    if load_harmony_encoding is None:
+        raise RuntimeError("openai_harmony not available")
+    return load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def cmd_oracle_label(args: argparse.Namespace) -> int:
+    """Oracle labeling with per-record streaming writes and resume.
+
+    - Appends to scores.jsonl and audit_snippets.jsonl as each record finishes and flushes immediately.
+    - Prints a compact heartbeat every 100 new records.
+    - Resumes by skipping doc_ids already present in scores.jsonl.
+    - Writes summary.json at the end (and summary.partial.json periodically).
+    """
+    enc = _load_enc()
+    out_dir = Path(args.out)
+    _ensure_dir(out_dir)
+
+    # Resume: load already processed doc_ids (if any)
+    scores_path = out_dir / "scores.jsonl"
+    audit_path = out_dir / "audit_snippets.jsonl"
+    summary_path = out_dir / "summary.json"
+    partial_summary_path = out_dir / "summary.partial.json"
+    processed: set[str] = set()
+    per_source: Dict[str, Tuple[int, int]] = {}
+    ok_total = 0
+    already = 0
+    if scores_path.exists():
+        with scores_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    j = json.loads(line)
+                    did = j.get("doc_id")
+                    src = j.get("source", "unknown")
+                    if did:
+                        processed.add(str(did))
+                    ok = bool(j.get("ok", j.get("scores") is not None))
+                    c_all, c_ok = per_source.get(src, (0, 0))
+                    per_source[src] = (c_all + 1, c_ok + (1 if ok else 0))
+                    if ok:
+                        ok_total += 1
+                    already += 1
+                except Exception:
+                    # Ignore malformed trailing line
+                    pass
+
+    # Input iterator (don’t materialize full list if large)
+    def iter_samples():
+        if getattr(args, "input_docids", None):
+            import numpy as np
+            with open(args.input_docids, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    j = json.loads(line)
+                    doc_id = j.get("doc_id")
+                    if not doc_id:
+                        continue
+                    if doc_id in processed:
+                        continue  # resume skip
+                    d = parse_doc_id(doc_id)
+                    arr = np.load(shard_path(args.data_root, d), mmap_mode="r")
+                    toks = arr[int(d.start) : int(d.end)].tolist()
+                    text = enc.decode(toks)
+                    src = j.get("source") or d.source
+                    yield {"doc_id": doc_id, "source": src, "text": text}
+        else:
+            with open(args.input_jsonl, "r", encoding="utf-8") as f:
+                idx = already
+                for line in f:
+                    if not line.strip():
+                        continue
+                    j = json.loads(line)
+                    text = j.get("text", "")
+                    if not text:
+                        continue
+                    doc_id = j.get("doc_id") or j.get("id") or f"row:{idx}"
+                    idx += 1
+                    if doc_id in processed:
+                        continue
+                    src = j.get("source") or j.get("src") or "unknown"
+                    yield {"doc_id": doc_id, "source": src, "text": text}
+
+    # Streaming write handles (append mode)
+    scores_f = scores_path.open("a", encoding="utf-8")
+    audit_f = audit_path.open("a", encoding="utf-8")
+
+    # Generator once; submit chunks
+    device = torch.device("cuda")
+    gen = BatchedGenerator(
+        args.checkpoint, max_seq_len=args.max_ctx, max_batch=args.max_batch, device=device
+    )
+
+    CHUNK = max(args.max_batch * 2, 64)
+    buf: List[Dict[str, Any]] = []
+    wrote = 0
+    total_seen = already
+
+    def process_chunk(chunk: List[Dict[str, Any]]):
+        nonlocal wrote, ok_total, total_seen, per_source
+        if not chunk:
+            return
+        # Build prompts for chunk
+        prompts: List[List[int]] = []
+        snippets: List[str] = []
+        for s in chunk:
+            toks = build_prompt(enc, s["text"], is_code=False)
+            toks = right_trim(toks, max_ctx=args.max_ctx, max_new=args.max_new)
+            prompts.append(toks)
+            snippets.append(s["text"][:256].replace("\n", " "))
+
+        def on_finish(idx: int, r: Dict[str, Any]) -> None:
+            nonlocal wrote, ok_total, total_seen, per_source
+            try:
+                s = chunk[idx]; snip = snippets[idx]
+                row: Dict[str, Any] = {
+                    "doc_id": s["doc_id"],
+                    "source": s["source"],
+                    "ok": bool(r.get("ok")),
+                    "snippet": snip,
+                }
+                if row["ok"] and r.get("scores"):
+                    row["scores"] = r["scores"]
+                    row["aggregated"] = compute_aggregated(r["scores"])  # [0,1]
+                    ok_total += 1
+                else:
+                    row["raw"] = r.get("final_text", "")
+                scores_f.write(json.dumps(row, ensure_ascii=False) + "\n"); scores_f.flush()
+                audit_f.write(json.dumps({k: row[k] for k in ("doc_id", "source", "ok")} | {"scores": row.get("scores"), "snippet": snip}, ensure_ascii=False) + "\n"); audit_f.flush()
+                c_all, c_ok = per_source.get(s["source"], (0, 0))
+                per_source[s["source"]] = (c_all + 1, c_ok + (1 if row["ok"] else 0))
+                wrote += 1; total_seen += 1
+                if wrote % 100 == 0:
+                    partial = {
+                        "total_seen": total_seen,
+                        "parsed": ok_total,
+                        "parse_rate": (ok_total / max(1, total_seen)),
+                    }
+                    with partial_summary_path.open("w", encoding="utf-8") as pf:
+                        json.dump(partial, pf)
+                    print(f"wrote {wrote} (this run), total_seen={total_seen}, ok={ok_total}", flush=True)
+            except Exception:
+                pass
+
+        # Stream results as each sequence finishes
+        _ = grade_prompts(gen, enc, prompts, max_new=args.max_new, on_finish=on_finish)
+
+    # Drain iterator
+    for s in iter_samples():
+        buf.append(s)
+        if len(buf) >= CHUNK:
+            process_chunk(buf)
+            buf.clear()
+    process_chunk(buf)
+
+    # Close appenders
+    scores_f.close(); audit_f.close()
+
+    # Final summary
+    total = total_seen
+    summary = {
+        "total": total,
+        "parsed": ok_total,
+        "parse_rate": (ok_total / max(1, total)),
+        "per_source": {k: {"count": v[0], "parsed": v[1], "parse_rate": (v[1] / max(1, v[0]))} for k, v in per_source.items()},
+        "scorer_model": "gpt-oss-120b",
+        "scorer_version": "gpt-oss-120b-v1",
+        "resumed_from": already,
+    }
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    # Expect labels.jsonl with scores and aggregated or compute aggregated
+    dims = ["helpfulness", "correctness", "coherence", "complexity", "density"]
+    X: List[List[float]] = []
+    y: List[float] = []
+    with open(args.labels, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            j = json.loads(line)
+            s = j.get("scores")
+            if not s:
+                continue
+            xrow = [float(s.get(k, 0.0)) / 4.0 for k in dims]
+            X.append(xrow)
+            if "aggregated" in j:
+                y.append(float(j["aggregated"]))
+            else:
+                y.append(sum(xrow) / len(xrow))
+    if not X:
+        print("No valid rows in labels file")
+        return 1
+    Xn = np.asarray(X, dtype=np.float64)
+    yn = np.asarray(y, dtype=np.float64)
+    # Solve least squares w to minimize ||Xw - y||
+    w, *_ = np.linalg.lstsq(Xn, yn, rcond=None)
+    w = np.clip(w, 0.0, 1.0)
+    w = w / max(1e-8, w.sum())
+
+    # Simple τ suggestion at target keep rate
+    target_keep = float(args.target_keep)
+    scores = (Xn @ w)
+    taus = np.quantile(scores, [1 - target_keep, target_keep])
+    out = {
+        "weights": {k: float(v) for k, v in zip(dims, w)},
+        "tau_drop": float(taus[0]),
+        "tau_keep": float(taus[1]),
+        "count": int(len(scores)),
+    }
+    out_path = Path(args.out)
+    _ensure_dir(out_path)
+    with (out_path / "calibration_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def _tokenize_batch(texts: List[str], enc_name: str = "o200k_harmony", max_ctx: int = 4096) -> Tuple[torch.Tensor, torch.Tensor]:
+    import tiktoken
+
+    enc = tiktoken.get_encoding(enc_name)
+    ids = [enc.encode_ordinary(t)[:max_ctx] for t in texts]
+    max_len = max(len(x) for x in ids)
+    input_ids = torch.zeros(len(ids), max_len, dtype=torch.long)
+    for i, t in enumerate(ids):
+        input_ids[i, : len(t)] = torch.tensor(t, dtype=torch.long)
+    positions = torch.arange(max_len, dtype=torch.long).unsqueeze(0).repeat(len(ids), 1)
+    return input_ids, positions
+
+
+def _load_calibration(cal_dir: str) -> Tuple[Dict[str, float], float, float]:
+    p = Path(cal_dir) / "calibration_summary.json"
+    with p.open("r", encoding="utf-8") as f:
+        j = json.load(f)
+    w = j.get("weights") or {}
+    return w, float(j.get("tau_drop", 0.3)), float(j.get("tau_keep", 0.55))
+
+
+def _aggregated_with_w(scores: Dict[str, float], w: Dict[str, float]) -> float:
+    dims = ["helpfulness", "correctness", "coherence", "complexity", "density"]
+    if not w:
+        return compute_aggregated(scores)
+    s = 0.0
+    tot = 0.0
+    for k in dims:
+        if k in scores and k in w:
+            s += (float(scores[k]) / 4.0) * float(w[k])
+            tot += float(w[k])
+    if tot <= 0:
+        return compute_aggregated(scores)
+    return s / tot
+
+
+def load_local_hydra_judge(*, model: Transformer, heads_dir: str | Path, device: torch.device) -> MTPJudgeHead:
+    """Load HYDRA judge head weights on top of a frozen backbone."""
+    ckpt_dir = Path(heads_dir)
+    judge = MTPJudgeHead(model.config.hidden_size).to(device)
+    judge.load_state_dict(torch.load(ckpt_dir / "hydra_judge.pt", map_location=device))
+    # Run judge in BF16 to align with backbone activations
+    judge = judge.to(device=device, dtype=torch.bfloat16)
+    judge.eval()
+    return judge
+
+
+@torch.no_grad()
+def grade_texts_with_local_hydra_judge(
+    *,
+    model: Transformer,
+    judge: MTPJudgeHead,
+    texts: List[str],
+    doc_ids: List[str],
+    max_ctx: int,
+    batch_size: int,
+    w: Dict[str, float],
+    tau_drop: float,
+    tau_keep: float,
+    device: torch.device,
+    enc_name: str = "o200k_harmony",
+) -> List[Dict[str, Any]]:
+    """Grade texts with the local HYDRA judge head.
+
+    Returns list of rows:
+      {doc_id, scores{5}, aggregated, decision}
+    """
+    if len(texts) != len(doc_ids):
+        raise ValueError("texts/doc_ids length mismatch")
+    out: List[Dict[str, Any]] = []
+    for i in range(0, len(texts), batch_size):
+        chunk_texts = texts[i : i + batch_size]
+        chunk_ids = doc_ids[i : i + batch_size]
+        input_ids, positions = _tokenize_batch(chunk_texts, enc_name=enc_name, max_ctx=max_ctx)
+        input_ids = input_ids.to(device)
+        positions = positions.to(device)
+        _, h = model(
+            input_ids,
+            positions,
+            return_hidden_states=True,
+            up_to_layer=model.config.num_hidden_layers,
+            no_logits=True,
+        )
+        h24 = h.get(24)
+        if h24 is None:
+            raise RuntimeError("Missing hidden state at layer 24")
+        s0, s1 = judge(h24, teacher_scores=None)
+        sj = s1 if s1 is not None else s0
+        sj = torch.clamp(sj, 0.0, 4.0)
+        for j, did in enumerate(chunk_ids):
+            final_scores = {
+                k: float(sj[j, idx].item())
+                for idx, k in enumerate(["helpfulness", "correctness", "coherence", "complexity", "density"])
+            }
+            agg_final = _aggregated_with_w(final_scores, w)
+            if agg_final >= tau_keep:
+                decision = "keep"
+            elif agg_final < tau_drop:
+                decision = "drop"
+            else:
+                decision = "band"
+            out.append({"doc_id": did, "scores": final_scores, "aggregated": agg_final, "decision": decision})
+    return out
+
+
+def cmd_grade(args: argparse.Namespace) -> int:
+    def iter_rows() -> Iterator[Dict[str, Any]]:
+        if getattr(args, "input_docids", None):
+            if not getattr(args, "data_root", None):
+                raise ValueError("--data-root is required when using --input-docids")
+            with open(args.input_docids, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    j = json.loads(line)
+                    doc_id = j.get("doc_id") or j.get("id")
+                    if not doc_id:
+                        continue
+                    src = j.get("source")
+                    if not src:
+                        try:
+                            src = parse_doc_id(doc_id).source
+                        except Exception:
+                            src = "unknown"
+                    yield {"doc_id": doc_id, "source": src}
+        else:
+            with open(args.input_jsonl, "r", encoding="utf-8") as f:
+                idx = 0
+                for line in f:
+                    if not line.strip():
+                        continue
+                    j = json.loads(line)
+                    text = j.get("text")
+                    if text is None:
+                        continue
+                    did = j.get("doc_id") or j.get("id") or f"row:{idx}"
+                    idx += 1
+                    yield {"doc_id": did, "source": j.get("source", "unknown"), "text": text}
+
+    # Load backbone and judge head (probe removed - never worked properly)
+    device = torch.device("cuda")
+    model = Transformer.from_checkpoint(args.checkpoint, device=device)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    judge = load_local_hydra_judge(model=model, heads_dir=args.heads_dir, device=device)
+    model.eval()
+
+    # Calibration
+    w, tau_drop, tau_keep = _load_calibration(args.calibration)
+
+    # Tokenize batchwise and grade
+    out_dir = Path(args.out)
+    _ensure_dir(out_dir)
+    out_path = out_dir / "quality_scores.jsonl"
+    out_tmp_path = out_dir / "quality_scores.jsonl.tmp"
+    summary_path = out_dir / "summary.json"
+    summary_tmp_path = out_dir / "summary.json.tmp"
+
+    kept = 0
+    dropped = 0
+    band = 0
+    per_source: Dict[str, Tuple[int, int, int]] = {}
+    total = 0
+    with out_tmp_path.open("w", encoding="utf-8") as outf:
+        B = int(args.max_batch)
+        chunk: List[Dict[str, Any]] = []
+        for rec in iter_rows():
+            chunk.append(rec)
+            if len(chunk) < B:
+                continue
+            total += len(chunk)
+            # Build tensors either from shard tokens or from text
+            if getattr(args, "input_docids", None):
+                import numpy as np
+                toks_list: List[List[int]] = []
+                for r in chunk:
+                    d = parse_doc_id(r["doc_id"])
+                    arr = np.load(shard_path(args.data_root, d), mmap_mode="r")
+                    toks = arr[int(d.start) : int(d.end)].tolist()
+                    toks_list.append(toks[: args.max_ctx])
+                max_len = max(len(t) for t in toks_list)
+                input_ids = torch.zeros(len(toks_list), max_len, dtype=torch.long)
+                positions = torch.zeros(len(toks_list), max_len, dtype=torch.long)
+                for j2, t in enumerate(toks_list):
+                    n = len(t)
+                    if n:
+                        input_ids[j2, :n] = torch.tensor(t, dtype=torch.long)
+                        positions[j2, :n] = torch.arange(n, dtype=torch.long)
+            else:
+                texts = [r["text"] for r in chunk]
+                input_ids, positions = _tokenize_batch(texts, max_ctx=args.max_ctx)
+            input_ids = input_ids.to(device)
+            positions = positions.to(device)
+            with torch.no_grad():
+                _, h = model(
+                    input_ids,
+                    positions,
+                    return_hidden_states=True,
+                    up_to_layer=model.config.num_hidden_layers,
+                    no_logits=True,
+                )
+                h24 = h.get(24)
+                if h24 is None:
+                    raise RuntimeError("Missing hidden state at layer 24")
+
+            # Grade with Judge head only (probe removed)
+            for j, rec in enumerate(chunk):
+                with torch.no_grad():
+                    s0, s1 = judge(h24[j : j + 1], teacher_scores=None)
+                    sj = s1 if s1 is not None else s0
+                    sj = torch.clamp(sj, 0.0, 4.0)[0]
+                final_scores = {k: float(sj[idx].item()) for idx, k in enumerate(["helpfulness", "correctness", "coherence", "complexity", "density"]) }
+                agg_final = _aggregated_with_w(final_scores, w)
+
+                # Simple threshold: keep vs band (no early drop without probe)
+                if agg_final >= tau_keep:
+                    decision = "keep"
+                    kept += 1
+                else:
+                    decision = "band"
+                    band += 1
+                c = per_source.get(rec["source"], (0, 0, 0))
+                if decision == "keep":
+                    per_source[rec["source"]] = (c[0] + 1, c[1], c[2])
+                else:  # band
+                    per_source[rec["source"]] = (c[0], c[1], c[2] + 1)
+
+                out_row = {
+                    "doc_id": rec["doc_id"],
+                    "source": rec["source"],
+                    "scores": final_scores,
+                    "aggregated": agg_final,
+                    "decision": decision,
+                }
+                outf.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+            chunk = []
+
+        if chunk:
+            total += len(chunk)
+            if getattr(args, "input_docids", None):
+                import numpy as np
+                toks_list = []
+                for r in chunk:
+                    d = parse_doc_id(r["doc_id"])
+                    arr = np.load(shard_path(args.data_root, d), mmap_mode="r")
+                    toks = arr[int(d.start) : int(d.end)].tolist()
+                    toks_list.append(toks[: args.max_ctx])
+                max_len = max(len(t) for t in toks_list)
+                input_ids = torch.zeros(len(toks_list), max_len, dtype=torch.long)
+                positions = torch.zeros(len(toks_list), max_len, dtype=torch.long)
+                for j2, t in enumerate(toks_list):
+                    n = len(t)
+                    if n:
+                        input_ids[j2, :n] = torch.tensor(t, dtype=torch.long)
+                        positions[j2, :n] = torch.arange(n, dtype=torch.long)
+            else:
+                texts = [r["text"] for r in chunk]
+                input_ids, positions = _tokenize_batch(texts, max_ctx=args.max_ctx)
+            input_ids = input_ids.to(device)
+            positions = positions.to(device)
+            with torch.no_grad():
+                _, h = model(
+                    input_ids,
+                    positions,
+                    return_hidden_states=True,
+                    up_to_layer=model.config.num_hidden_layers,
+                    no_logits=True,
+                )
+                h24 = h.get(24)
+                if h24 is None:
+                    raise RuntimeError("Missing hidden state at layer 24")
+
+            for j, rec in enumerate(chunk):
+                with torch.no_grad():
+                    s0, s1 = judge(h24[j : j + 1], teacher_scores=None)
+                    sj = s1 if s1 is not None else s0
+                    sj = torch.clamp(sj, 0.0, 4.0)[0]
+                final_scores = {k: float(sj[idx].item()) for idx, k in enumerate(["helpfulness", "correctness", "coherence", "complexity", "density"]) }
+                agg_final = _aggregated_with_w(final_scores, w)
+                if agg_final >= tau_keep:
+                    decision = "keep"
+                    kept += 1
+                else:
+                    decision = "band"
+                    band += 1
+                c = per_source.get(rec["source"], (0, 0, 0))
+                if decision == "keep":
+                    per_source[rec["source"]] = (c[0] + 1, c[1], c[2])
+                else:
+                    per_source[rec["source"]] = (c[0], c[1], c[2] + 1)
+                out_row = {
+                    "doc_id": rec["doc_id"],
+                    "source": rec["source"],
+                    "scores": final_scores,
+                    "aggregated": agg_final,
+                    "decision": decision,
+                }
+                outf.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+
+    out_tmp_path.replace(out_path)
+    summary = {
+        "total": total,
+        "kept": kept,
+        "dropped": dropped,
+        "band": band,
+        "per_source": {k: {"kept": v[0], "dropped": v[1], "band": v[2]} for k, v in per_source.items()},
+        "tau_drop": tau_drop,
+        "tau_keep": tau_keep,
+    }
+    with summary_tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    summary_tmp_path.replace(summary_path)
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser("nmoe.data.hydra")
+    sp = p.add_subparsers(dest="cmd", required=True)
+
+    p_label = sp.add_parser("oracle-label", help="Label data with 120B oracle")
+    g_label = p_label.add_mutually_exclusive_group(required=True)
+    g_label.add_argument("--input-jsonl", dest="input_jsonl")
+    g_label.add_argument("--input-docids", dest="input_docids")
+    p_label.add_argument("--data-root", help="Data root for shard paths when using --input-docids")
+    p_label.add_argument("--checkpoint", required=True)
+    p_label.add_argument("--out", required=True)
+    p_label.add_argument("--max-new", dest="max_new", type=int, default=2048)
+    p_label.add_argument("--max-ctx", dest="max_ctx", type=int, default=4096)
+    p_label.add_argument("--max-batch", dest="max_batch", type=int, default=32)
+    p_label.set_defaults(func=cmd_oracle_label)
+
+    p_cal = sp.add_parser("calibrate", help="Fit aggregation weights and thresholds from labels.jsonl")
+    p_cal.add_argument("--labels", required=True)
+    p_cal.add_argument("--out", required=True)
+    p_cal.add_argument("--target-keep", default=0.5)
+    p_cal.set_defaults(func=cmd_calibrate)
+
+    p_grade = sp.add_parser("grade", help="Grade a corpus with HYDRA 20B (requires trained heads)")
+    g_grade = p_grade.add_mutually_exclusive_group(required=True)
+    g_grade.add_argument("--input-jsonl")
+    g_grade.add_argument("--input-docids")
+    p_grade.add_argument("--data-root", help="Data root for shard paths when using --input-docids")
+    p_grade.add_argument("--checkpoint", required=True, help="20B backbone checkpoint dir")
+    p_grade.add_argument("--heads-dir", required=True, help="Dir containing hydra_probe.pt and hydra_judge.pt")
+    p_grade.add_argument("--calibration", required=True, help="Dir containing calibration_summary.json")
+    p_grade.add_argument("--out", required=True)
+    p_grade.add_argument("--max-ctx", dest="max_ctx", type=int, default=4096)
+    p_grade.add_argument("--max-batch", dest="max_batch", type=int, default=16)
+    p_grade.set_defaults(func=cmd_grade)
+
+    return p
+
+
+def main(argv: List[str] | None = None) -> int:
+    ap = build_argparser()
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

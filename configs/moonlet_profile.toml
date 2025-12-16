@@ -1,0 +1,41 @@
+# Moonlet profile: short single-GPU run for nsys/ncu.
+#
+# Usage:
+#   NMOE_NVTX=1 NMOE_TIMERS=0 python -m nmoe.train configs/moonlet_profile.toml
+
+preset = "moonlet"
+experiment_id = "moonlet_profile"
+
+# =============================================================================
+# Model Architecture (REQUIRED)
+# =============================================================================
+vocab_size = 201088
+tokenizer  = "o200k_harmony"
+dim = 2048
+inter_dim = 11264
+moe_inter_dim = 1408
+n_layers = 12
+n_dense_layers = 1
+n_heads = 16
+n_routed_experts = 64
+n_shared_experts = 2
+n_activated_experts = 6
+route_scale = 2.446
+
+# =============================================================================
+# Data
+# =============================================================================
+data_path = "/data/fineweb_edu"
+
+# =============================================================================
+# Training
+# =============================================================================
+dtype = "bf16"
+batch_size = 8
+seq_len = 4096
+steps = 50
+log_every = 1
+
+# Avoid checkpoint I/O noise in profiles.
+checkpoint_every = 1000000000
+resume = false

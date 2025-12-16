@@ -1,0 +1,48 @@
+# Moonlet: 7B2A MoE for single-GPU research and debugging
+#
+# Usage:
+#   # 1. Preprocess data (one-time)
+#   python -m nmoe.data.cli prep --source hf --dataset HuggingFaceFW/fineweb-edu --output /data/fineweb_edu --name fineweb_edu
+#
+#   # 2. Train
+#   python -m nmoe.train configs/moonlet.toml
+
+preset = "moonlet"
+experiment_id = "moonlet_dev"
+
+# =============================================================================
+# Model Architecture (REQUIRED)
+# =============================================================================
+vocab_size = 201088         # o200k_harmony tokenizer
+tokenizer  = "o200k_harmony"
+dim = 2048
+inter_dim = 11264
+moe_inter_dim = 1408
+n_layers = 12
+n_dense_layers = 1
+n_heads = 16
+n_routed_experts = 64
+n_shared_experts = 2
+n_activated_experts = 6      # routed top-k; total experts/token = n_shared_experts + n_activated_experts (=8)
+route_scale = 2.446
+
+# =============================================================================
+# Data
+# =============================================================================
+data_path = "/data/fineweb_edu"  # Pre-tokenized .npy shards (from nmoe.data.cli prep)
+
+# =============================================================================
+# Optimizer (matches old_nmoe moonlet.toml)
+# =============================================================================
+lr_dense = 3e-3
+lr_router = 3e-3     # Separate router LR with weight_decay=0 (critical for aux-free)
+lr_expert = 4.5e-2   # 15x dense LR to compensate for smaller expert gradients
+
+# =============================================================================
+# Training Overrides (everything else uses defaults from config.py)
+# =============================================================================
+steps = 200
+dtype = "nvfp4"
+batch_size = 8
+seq_len = 4096
+resume = false

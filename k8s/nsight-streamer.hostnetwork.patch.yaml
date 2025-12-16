@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nsight-streamer
+  namespace: nsight
+spec:
+  template:
+    spec:
+      # Required for WebRTC/TURN relay ports (dynamic) to be reachable externally.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet

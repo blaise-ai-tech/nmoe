@@ -1,0 +1,21 @@
+FROM xjdr/nmoe:base
+
+WORKDIR /workspace/nmoe
+
+ENV NCCL_DEBUG=WARN
+ENV NCCL_IB_DISABLE=1
+ENV NCCL_P2P_DISABLE=0
+ENV NCCL_P2P_LEVEL=NVL
+ENV NCCL_SHM_DISABLE=0
+ENV CUDA_DEVICE_MAX_CONNECTIONS=1
+
+
+# Copy source
+COPY . /workspace/nmoe
+
+# Build kernels
+RUN . .venv/bin/activate && make -C nmoe/csrc
+
+# Python path
+ENV PYTHONPATH=/workspace/nmoe:/workspace/nmoe/nmoe/csrc:/workspace/nmoe/third_party/flash_attn
+

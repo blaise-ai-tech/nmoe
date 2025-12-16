@@ -1,0 +1,28 @@
+# Exclude NVSHMEM submodule working tree (will be cloned fresh in Docker)
+third_party/nvshmem/
+
+# Exclude git metadata (not needed in container)
+.git/
+.gitmodules
+
+# Exclude build artifacts
+third_party/nvshmem/build/
+*.o
+*.so
+*.pyc
+__pycache__/
+
+# Exclude virtual environment
+.venv/
+venv/
+
+# Exclude test outputs and logs
+/tmp/
+*.log
+
+# Exclude documentation and development files
+*.md
+REVIEW.md
+DEBUG_SESSION_*.md
+AGENTS.md
+RDEP_SPEC.md

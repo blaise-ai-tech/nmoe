@@ -1,0 +1,12 @@
+{
+  "weights": {
+    "helpfulness": 1.0,
+    "correctness": 1.0,
+    "coherence": 1.0,
+    "complexity": 1.0,
+    "density": 1.0
+  },
+  "tau_drop": 0.3,
+  "tau_keep": 0.5,
+  "count": 0
+}

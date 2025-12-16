@@ -1,0 +1,257 @@
+diff --git a/src/include/device_host_transport/nvshmem_common_ibgda.h b/src/include/device_host_transport/nvshmem_common_ibgda.h
+index 9b2585d..2bfe29c 100644
+--- a/src/include/device_host_transport/nvshmem_common_ibgda.h
++++ b/src/include/device_host_transport/nvshmem_common_ibgda.h
+@@ -48,6 +48,8 @@
+         qp_man.tx_wq.cons_idx = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                    \
+         qp_man.tx_wq.get_head = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                    \
+         qp_man.tx_wq.get_tail = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                    \
++        qp_man.rx_wq.resv_head = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                   \
++        qp_man.rx_wq.cons_idx = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                    \
+         qp_man.ibuf.head = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                         \
+         qp_man.ibuf.tail = NVSHMEMI_IBGDA_ULSCALAR_INVALID;                         \
+     } while (0);
+@@ -170,14 +172,18 @@ typedef struct {
+         uint64_t get_head;    // last wqe idx + 1 with a "fetch" operation (g, get, amo_fetch)
+         uint64_t get_tail;    // last wqe idx + 1 polled with cst; get_tail > get_head is possible
+     } tx_wq;
++    struct {
++        uint64_t resv_head;   // last reserved wqe idx + 1
++        uint64_t cons_idx;    // polled wqe idx + 1 (consumer index + 1)
++    } rx_wq;
+     struct {
+         uint64_t head;
+         uint64_t tail;
+     } ibuf;
+     char padding[NVSHMEMI_IBGDA_QP_MANAGEMENT_PADDING];
+ } __attribute__((__aligned__(8))) nvshmemi_ibgda_device_qp_management_v1;
+-static_assert(sizeof(nvshmemi_ibgda_device_qp_management_v1) == 96,
+-              "ibgda_device_qp_management_v1 must be 96 bytes.");
++static_assert(sizeof(nvshmemi_ibgda_device_qp_management_v1) == 112,
++              "ibgda_device_qp_management_v1 must be 112 bytes.");
+ 
+ typedef nvshmemi_ibgda_device_qp_management_v1 nvshmemi_ibgda_device_qp_management_t;
+ 
+@@ -201,9 +207,19 @@ typedef struct nvshmemi_ibgda_device_qp {
+         // May point to mvars.prod_idx or internal prod_idx
+         uint64_t *prod_idx;
+     } tx_wq;
++    struct {
++        uint16_t nwqes;
++        uint64_t tail;
++        void *wqe;
++        __be32 *dbrec;
++        void *bf;
++        nvshmemi_ibgda_device_cq_t *cq;
++        // May point to mvars.prod_idx or internal prod_idx
++        uint64_t *prod_idx;
++    } rx_wq;
+     nvshmemi_ibgda_device_qp_management_v1 mvars;  // management variables
+ } nvshmemi_ibgda_device_qp_v1;
+-static_assert(sizeof(nvshmemi_ibgda_device_qp_v1) == 184, "ibgda_device_qp_v1 must be 184 bytes.");
++static_assert(sizeof(nvshmemi_ibgda_device_qp_v1) == 256, "ibgda_device_qp_v1 must be 256 bytes.");
+ 
+ typedef nvshmemi_ibgda_device_qp_v1 nvshmemi_ibgda_device_qp_t;
+ 
+diff --git a/src/modules/transport/ibgda/ibgda.cpp b/src/modules/transport/ibgda/ibgda.cpp
+index 7989e38..ac88f9f 100644
+--- a/src/modules/transport/ibgda/ibgda.cpp
++++ b/src/modules/transport/ibgda/ibgda.cpp
+@@ -210,6 +210,7 @@ struct ibgda_ep {
+     struct ibgda_mem_object *uar_mobject;
+ 
+     struct ibgda_cq *send_cq;
++    struct ibgda_cq *recv_cq;
+     struct ibv_ah *ah;
+ 
+     uint32_t user_index;
+@@ -612,6 +613,7 @@ out:
+     return NVSHMEMX_SUCCESS;
+ }
+ 
++#ifdef NVSHMEM_USE_GDRCOPY
+ int nvshmemt_ibgda_progress(nvshmem_transport_t t) {
+     int status = 0;
+     status = ibgda_dci_progress(t);
+@@ -619,6 +621,11 @@ int nvshmemt_ibgda_progress(nvshmem_transport_t t) {
+     status = ibgda_rc_progress(t);
+     return status;
+ }
++#else
++int nvshmemt_ibgda_progress(nvshmem_transport_t t) {
++    return NVSHMEMX_ERROR_NOT_SUPPORTED;
++}
++#endif
+ 
+ /* =============================================================================
+  * Memory handle management start
+@@ -2007,7 +2014,7 @@ static int ibgda_create_qp_shared_objects(nvshmemt_ibgda_state_t *ibgda_state,
+     struct ibv_context *context = device->common_device.context;
+     struct ibv_pd *pd = device->common_device.pd;
+     size_t num_wqebb = IBGDA_ROUND_UP_POW2_OR_0(ibgda_qp_depth);
+-    size_t wq_buf_size_per_qp = num_wqebb * MLX5_SEND_WQE_BB;  // num_wqebb is always a power of 2
++    size_t wq_buf_size_per_qp = num_wqebb * MLX5_SEND_WQE_BB * 2;  // 2x for RX+TX
+ 
+     struct ibv_srq *srq = NULL;
+     struct ibv_srq_init_attr srq_init_attr;
+@@ -2142,6 +2149,9 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep
+     int cqe_version = 0;
+ 
+     struct ibgda_cq *send_cq = NULL;
++    struct ibgda_cq *recv_cq = NULL;
++    size_t num_recv_wqe = ibgda_qp_depth;
++    size_t recv_wqe_size = 16;
+ 
+     size_t num_wqebb = IBGDA_ROUND_UP_POW2_OR_0(ibgda_qp_depth);
+ 
+@@ -2171,6 +2181,12 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep
+     status = ibgda_create_cq(ibgda_state, &send_cq, device);
+     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_create_cq failed.\n");
+ 
++    // Create recv_cq for RC QPs (they need bidirectional communication)
++    if (qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC) {
++        status = ibgda_create_cq(ibgda_state, &recv_cq, device);
++        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_create_cq (recv) failed.\n");
++    }
++
+     // Allocate and map UAR. This will be used as a DB/BF register.
+     status = ibgda_alloc_and_map_qp_uar(context, ibgda_nic_handler, &uar_mobject,
+                                         ibgda_nic_handler != IBGDA_NIC_HANDLER_GPU);
+@@ -2219,12 +2235,22 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep
+     DEVX_SET(qpc, qp_context, pm_state, MLX5_QPC_PM_STATE_MIGRATED);
+     DEVX_SET(qpc, qp_context, pd, device->qp_shared_object.pdn);
+     DEVX_SET(qpc, qp_context, uar_page, uar_mobject->uar->page_id);  // BF register
+-    DEVX_SET(qpc, qp_context, rq_type, IBGDA_SRQ_TYPE_VALUE);        // Shared Receive Queue
+-    DEVX_SET(qpc, qp_context, srqn_rmpn_xrqn, device->qp_shared_object.srqn);
++
++    // RC QPs use regular RQ, DCI QPs use SRQ
++    if (qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC) {
++        DEVX_SET(qpc, qp_context, rq_type, 0);  // Regular Receive Queue
++        DEVX_SET(qpc, qp_context, cqn_rcv, recv_cq->cqn);
++        DEVX_SET(qpc, qp_context, log_rq_size, IBGDA_ILOG2(num_recv_wqe));
++        DEVX_SET(qpc, qp_context, log_rq_stride, IBGDA_ILOG2(recv_wqe_size) - 4);
++    } else {
++        DEVX_SET(qpc, qp_context, rq_type, IBGDA_SRQ_TYPE_VALUE);  // Shared Receive Queue
++        DEVX_SET(qpc, qp_context, srqn_rmpn_xrqn, device->qp_shared_object.srqn);
++        DEVX_SET(qpc, qp_context, cqn_rcv, device->qp_shared_object.rcqn);
++        DEVX_SET(qpc, qp_context, log_rq_size, 0);
++    }
++
+     DEVX_SET(qpc, qp_context, cqn_snd, send_cq->cqn);
+-    DEVX_SET(qpc, qp_context, cqn_rcv, device->qp_shared_object.rcqn);
+     DEVX_SET(qpc, qp_context, log_sq_size, IBGDA_ILOG2_OR0(num_wqebb));
+-    DEVX_SET(qpc, qp_context, log_rq_size, 0);
+     DEVX_SET(qpc, qp_context, cs_req, 0);                                     // Disable CS Request
+     DEVX_SET(qpc, qp_context, cs_res, 0);                                     // Disable CS Response
+     DEVX_SET(qpc, qp_context, dbr_umem_valid, IBGDA_MLX5_UMEM_VALID_ENABLE);  // Enable dbr_umem_id
+@@ -2244,14 +2270,22 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep
+     ep->portid = portid;
+ 
+     ep->sq_cnt = num_wqebb;
+-    ep->sq_buf_offset = 0;
+ 
+-    ep->rq_cnt = 0;
+-    ep->rq_buf_offset = 0;
++    // RC QPs have RX queue, so TX buffer starts after RX buffer
++    if (qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC) {
++        ep->rq_cnt = num_recv_wqe;
++        ep->rq_buf_offset = 0;
++        ep->sq_buf_offset = num_recv_wqe * recv_wqe_size;
++    } else {
++        ep->rq_cnt = 0;
++        ep->rq_buf_offset = 0;
++        ep->sq_buf_offset = 0;
++    }
+ 
+     ep->uar_mobject = uar_mobject;
+ 
+     ep->send_cq = send_cq;
++    ep->recv_cq = recv_cq;
+ 
+     ep->qp_type = qp_type;
+ 
+@@ -2263,6 +2297,7 @@ out:
+     if (status) {
+         if (uar_mobject) ibgda_unmap_and_free_qp_uar(uar_mobject);
+         if (send_cq) ibgda_destroy_cq(send_cq);
++        if (recv_cq) ibgda_destroy_cq(recv_cq);
+         if (ep) free(ep);
+     }
+ 
+@@ -3181,6 +3216,7 @@ static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshm
+     const size_t cons_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.cons_idx);
+     const size_t wqe_h_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.resv_head);
+     const size_t wqe_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.ready_head);
++    const size_t rx_cons_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.cons_idx);
+ 
+     /* Get and store RC information start */
+     if (num_rc_handles > 0) {
+@@ -3222,6 +3258,18 @@ static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshm
+                       my_cq_index, cq_h[my_cq_index].qpn, cq_h[my_cq_index].qp_type);
+                 rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+                 cq_h[my_cq_index].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
++
++                // Setup recv CQ for RC QPs (recv CQs are after all send CQs)
++                if (ep->recv_cq) {
++                    int my_recv_cq_index = first_cq_index + (device->rc.num_eps_per_pe * n_pes) + qp_index;
++                    rc_h[qp_index].rx_wq.cq = &cq_d[my_recv_cq_index];
++                    ibgda_get_device_cq(&cq_h[my_recv_cq_index], ep->recv_cq);
++                    cq_h[my_recv_cq_index].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
++                    cq_h[my_recv_cq_index].qpn = rc_h[qp_index].qpn;
++                    cq_h[my_recv_cq_index].qp_type = rc_h[qp_index].qp_type;
++                    TRACE(ibgda_state->log_level, "Populating recv_cq at cq_idx #%d qpn: %u",
++                          my_recv_cq_index, cq_h[my_recv_cq_index].qpn);
++                }
+             }
+         }
+     }
+@@ -3326,7 +3374,8 @@ static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem
+     for (int j = 0; j < n_devs_selected; j++) {
+         int dev_idx = ibgda_state->selected_dev_ids[j];
+         struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+-        *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes);
++        // Each RC qp has one send CQ and one recv CQ.
++        *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes) * 2;
+     }
+     /* Calculate CQ buffer sizes end */
+ 
+@@ -3474,6 +3523,10 @@ static int ibgda_destroy_ep(struct ibgda_ep *ep) {
+         ibgda_destroy_cq(ep->send_cq);
+     }
+ 
++    if (ep->recv_cq) {
++        ibgda_destroy_cq(ep->recv_cq);
++    }
++
+     if (ep->ah) {
+         ftable.destroy_ah(ep->ah);
+     }
+@@ -3517,8 +3570,9 @@ static void ibgda_get_device_qp(nvshmemt_ibgda_state_t *ibgda_state,
+     dev_qp->qp_type = ep->qp_type;
+     dev_qp->dev_idx = selected_dev_idx;
+ 
++    // TX queue starts after RX queue for RC QPs
+     dev_qp->tx_wq.wqe =
+-        (void *)((uintptr_t)qp_ctrl->wq_mobject->aligned.gpu_ptr + qp_ctrl->wq_offset);
++        (void *)((uintptr_t)qp_ctrl->wq_mobject->aligned.gpu_ptr + qp_ctrl->wq_offset + ep->sq_buf_offset);
+ 
+     if (ibgda_nic_handler == IBGDA_NIC_HANDLER_GPU) {
+         assert(qp_ctrl->dbr_mobject->has_gpu_mapping);
+@@ -3538,6 +3592,17 @@ static void ibgda_get_device_qp(nvshmemt_ibgda_state_t *ibgda_state,
+ 
+     dev_qp->tx_wq.nwqes = ep->sq_cnt;
+ 
++    // Setup RX queue for RC QPs (they have bidirectional communication)
++    if (ep->qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC) {
++        dev_qp->rx_wq.nwqes = ep->rq_cnt;
++        dev_qp->rx_wq.wqe = (void *)((uintptr_t)qp_ctrl->wq_mobject->aligned.gpu_ptr +
++                                      qp_ctrl->wq_offset + ep->rq_buf_offset);
++        dev_qp->rx_wq.dbrec = (__be32 *)((uintptr_t)qp_ctrl->dbr_mobject->aligned.gpu_ptr +
++                                          qp_ctrl->dbr_offset);
++        dev_qp->rx_wq.bf = (void *)ep->uar_mobject->aligned.gpu_ptr;
++        dev_qp->rx_wq.cq = NULL;  // Will be set in ibgda_setup_gpu_state
++    }
++
+     ibuf_dci_start = (uintptr_t)device->dci.dci_ctrl.internal_buf.mem_object->aligned.gpu_ptr;
+ 
+     if (ep->qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_DCI) {

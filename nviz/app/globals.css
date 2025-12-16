@@ -1,0 +1,244 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-b612-sans);
+  --font-mono: var(--font-b612-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  /* Rosé Pine Dark (Default) */
+  --radius: 0.5rem;
+
+  /* Base colors */
+  --background: 249 22% 9%; /* Base: darker for card contrast */
+  --foreground: 245 50% 91%; /* Text: #e0def4 */
+
+  /* Card */
+  --card: 247 23% 15%; /* Surface: #1f1d2e */
+  --card-foreground: 245 50% 91%; /* Text */
+
+  /* Popover */
+  --popover: 248 25% 18%; /* Overlay: #26233a */
+  --popover-foreground: 245 50% 91%; /* Text */
+
+  /* Primary - using Pine */
+  --primary: 197 49% 38%; /* Pine: #31748f */
+  --primary-foreground: 245 50% 91%; /* Text */
+
+  /* Secondary - using Foam */
+  --secondary: 189 43% 73%; /* Foam: #9ccfd8 */
+  --secondary-foreground: 249 22% 12%; /* Base */
+
+  /* Muted */
+  --muted: 248 25% 18%; /* Overlay */
+  --muted-foreground: 249 12% 47%; /* Muted: #6e6a86 */
+
+  /* Accent - using Iris */
+  --accent: 267 57% 78%; /* Iris: #c4a7e7 */
+  --accent-foreground: 249 22% 12%; /* Base */
+
+  /* Destructive - using Love */
+  --destructive: 343 76% 68%; /* Love: #eb6f92 */
+  --destructive-foreground: 245 50% 91%; /* Text */
+
+  /* Borders */
+  --border: 249 15% 28%; /* Highlight Med: #403d52 */
+  --input: 249 15% 28%; /* Highlight Med */
+  --ring: 267 57% 78%; /* Iris */
+
+  /* Charts - using Rosé Pine accent colors for dark mode */
+  --chart-1: 343 76% 68%; /* Love - for errors/critical */
+  --chart-2: 35 88% 72%; /* Gold - for warnings */
+  --chart-3: 197 49% 38%; /* Pine - for info */
+  --chart-4: 189 43% 73%; /* Foam - for success */
+  --chart-5: 267 57% 78%; /* Iris - for misc */
+
+  /* Sidebar */
+  --sidebar: 247 23% 15%; /* Surface */
+  --sidebar-foreground: 245 50% 91%; /* Text */
+  --sidebar-primary: 197 49% 38%; /* Pine */
+  --sidebar-primary-foreground: 245 50% 91%; /* Text */
+  --sidebar-accent: 248 25% 18%; /* Overlay */
+  --sidebar-accent-foreground: 245 50% 91%; /* Text */
+  --sidebar-border: 249 15% 28%; /* Highlight Med */
+  --sidebar-ring: 267 57% 78%; /* Iris */
+}
+
+.tomorrow-night-bright {
+  /* Tomorrow Night Bright */
+  /* Base colors */
+  --background: 0 0% 0%; /* #000000 */
+  --foreground: 0 0% 92%; /* #eaeaea */
+
+  /* Card */
+  --card: 0 0% 1%; /* 3% lightness for subtle contrast */
+  --card-foreground: 0 0% 92%; /* #eaeaea */
+
+  /* Popover */
+  --popover: 0 0% 16%; /* #2a2a2a */
+  --popover-foreground: 0 0% 92%; /* #eaeaea */
+
+  /* Primary - using Blue */
+  --primary: 220 57% 65%; /* #7aa6da */
+  --primary-foreground: 0 0% 92%; /* #eaeaea */
+
+  /* Secondary - using Aqua */
+  --secondary: 169 42% 60%; /* #70c0b1 */
+  --secondary-foreground: 0 0% 0%; /* #000000 */
+
+  /* Muted */
+  --muted: 0 0% 26%; /* #424242 - selection */
+  --muted-foreground: 0 0% 59%; /* #969896 - comment */
+
+  /* Accent - using Purple */
+  --accent: 277 46% 72%; /* #c397d8 */
+  --accent-foreground: 0 0% 0%; /* #000000 */
+
+  /* Destructive - using Red */
+  --destructive: 358 61% 58%; /* #d54e53 */
+  --destructive-foreground: 0 0% 92%; /* #eaeaea */
+
+  /* Borders */
+  --border: 0 0% 26%; /* #424242 */
+  --input: 0 0% 26%; /* #424242 */
+  --ring: 277 46% 72%; /* #c397d8 */
+
+  /* Charts - using Tomorrow Night Bright colors */
+  --chart-1: 358 61% 58%; /* Red - #d54e53 */
+  --chart-2: 42 70% 60%; /* Yellow - #e7c547 */
+  --chart-3: 220 57% 65%; /* Blue - #7aa6da */
+  --chart-4: 80 49% 54%; /* Green - #b9ca4a */
+  --chart-5: 277 46% 72%; /* Purple - #c397d8 */
+
+  /* Sidebar */
+  --sidebar: 0 0% 16%; /* #2a2a2a */
+  --sidebar-foreground: 0 0% 92%; /* #eaeaea */
+  --sidebar-primary: 220 57% 65%; /* Blue */
+  --sidebar-primary-foreground: 0 0% 92%; /* #eaeaea */
+  --sidebar-accent: 0 0% 26%; /* #424242 */
+  --sidebar-accent-foreground: 0 0% 92%; /* #eaeaea */
+  --sidebar-border: 0 0% 26%; /* #424242 */
+  --sidebar-ring: 277 46% 72%; /* Purple */
+}
+
+.light {
+  /* Rosé Pine Light */
+
+  /* Base colors */
+  --background: 32 57% 95%; /* Base: #faf4ed */
+  --foreground: 248 19% 40%; /* Text: #575279 */
+
+  /* Card */
+  --card: 35 100% 98%; /* Surface: #fffaf3 */
+  --card-foreground: 248 19% 40%; /* Text */
+
+  /* Popover */
+  --popover: 35 100% 98%; /* Surface */
+  --popover-foreground: 248 19% 40%; /* Text */
+
+  /* Primary - using Pine for primary actions */
+  --primary: 197 53% 34%; /* Pine: #286983 */
+  --primary-foreground: 32 57% 95%; /* Base */
+
+  /* Secondary - using Foam */
+  --secondary: 189 30% 48%; /* Foam: #56949f */
+  --secondary-foreground: 32 57% 95%; /* Base */
+
+  /* Muted */
+  --muted: 33 43% 91%; /* Overlay: #f2e9e1 */
+  --muted-foreground: 257 9% 61%; /* Muted: #9893a5 */
+
+  /* Accent - using Iris */
+  --accent: 268 21% 57%; /* Iris: #907aa9 */
+  --accent-foreground: 32 57% 95%; /* Base */
+
+  /* Destructive - using Love */
+  --destructive: 343 35% 55%; /* Love: #b4637a */
+  --destructive-foreground: 32 57% 95%; /* Base */
+
+  /* Borders */
+  --border: 10 9% 86%; /* Highlight Med: #dfdad9 */
+  --input: 10 9% 86%; /* Highlight Med */
+  --ring: 268 21% 57%; /* Iris */
+
+  /* Charts - using Rosé Pine accent colors */
+  --chart-1: 343 35% 55%; /* Love */
+  --chart-2: 35 81% 56%; /* Gold */
+  --chart-3: 197 53% 34%; /* Pine */
+  --chart-4: 189 30% 48%; /* Foam */
+  --chart-5: 268 21% 57%; /* Iris */
+
+  /* Sidebar */
+  --sidebar: 35 100% 98%; /* Surface */
+  --sidebar-foreground: 248 19% 40%; /* Text */
+  --sidebar-primary: 197 53% 34%; /* Pine */
+  --sidebar-primary-foreground: 32 57% 95%; /* Base */
+  --sidebar-accent: 33 43% 91%; /* Overlay */
+  --sidebar-accent-foreground: 248 19% 40%; /* Text */
+  --sidebar-border: 10 9% 86%; /* Highlight Med */
+  --sidebar-ring: 268 21% 57%; /* Iris */
+}
+
+* {
+  border-color: hsl(var(--border));
+  outline-color: hsl(var(--ring) / 0.5);
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-b612-sans), sans-serif;
+  font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+code, pre, .font-mono {
+  font-family: var(--font-b612-mono), monospace;
+}
+
+[data-slot="sidebar"] {
+  font-size: 0.95em;
+}
+
+[data-slot="sidebar"] * {
+  font-size: inherit;
+}
+
+.recharts-cartesian-axis-tick text {
+  fill: hsl(var(--muted-foreground)) !important;
+}

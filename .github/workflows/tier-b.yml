@@ -46,6 +46,8 @@ jobs:
           fetch-depth: 0
 
       - name: Build CUDA extension (PR merge ref)
+        env:
+          FLASHMLA_HOME: /workspace/nmoe/third_party/flashmla
         run: |
           set -euo pipefail
           . /workspace/nmoe/.venv/bin/activate
@@ -316,7 +318,7 @@ jobs:
             lines.append(f"| `{gid}` | **{status}** | {'' if tps is None else f'{tps:.0f}'} | {note} |")
           Path("/tmp/summary.md").write_text("\\n".join(lines))
           PY
-          cat /tmp/summary.md >> "$GITHUB_STEP_SUMMARY"
+          [ -f /tmp/summary.md ] && cat /tmp/summary.md >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Comment results on PR (sanitized)
         if: always()

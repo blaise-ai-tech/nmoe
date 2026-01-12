@@ -166,6 +166,8 @@ class MLA(nn.Module):
     self.wkv_b = nn.Linear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False, dtype=torch.bfloat16)
     self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False, dtype=torch.bfloat16)
     self.softmax_scale = self.qk_head_dim ** -0.5
+    self.is_attn_gate: bool = True
+    if self.is_attn_gate: self.g1_gate_proj = nn.Linear(self.dim, self.n_heads * self.v_head_dim, bias=False, dtype=torch.bfloat16)
 
   def init_weights(self, init_std: float = 0.02):
     for proj in [self.wq_a, self.wq_b, self.wkv_a, self.wkv_b]:
@@ -173,6 +175,8 @@ class MLA(nn.Module):
     nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
     self.q_norm.weight.data.fill_(1.0)
     self.kv_norm.weight.data.fill_(1.0)
+    if self.is_attn_gate:
+      nn.init.trunc_normal_(self.g1_gate_proj.weight, mean=0.0, std=0.02)
 
   @record_function("attn")
   def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -193,5 +197,9 @@ class MLA(nn.Module):
     k[..., self.qk_nope_head_dim:].copy_(k_pe.expand(-1, -1, self.n_heads, -1))
     with record_function("attn.kernel[mla]"):
       output = _MlaFa4FwdFlashMlaBwd.apply(q, k, v, self.softmax_scale)
+    if self.is_attn_gate:
+      gate_scores = torch.sigmoid(self.g1_gate_proj(x))
+      gate_scores = gate_scores.view(bsz, seqlen, self.n_heads, self.v_head_dim)
+      output = output * gate_scores
     output = output.contiguous().view(bsz, seqlen, self.n_heads * self.v_head_dim)
     return self.wo(output)
